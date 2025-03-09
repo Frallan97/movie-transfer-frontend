@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { useToast } from "@/components/ui/use-toast";
+import { Button } from "@/components/ui/button";
 import { useDropzone } from "react-dropzone";
 import axios from "axios";
-import pako from "pako";
-import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { useToast } from "@/components/ui/use-toast";
+import { ProjectSelection } from "@/components/ProjectSelection";
 
 type UploadFile = {
   file: File;
@@ -13,22 +13,45 @@ type UploadFile = {
 };
 
 export default function Home() {
-  // State for local uploads
+  // Folder (project) state
+  const [folder, setFolder] = useState("");
+  const [folders, setFolders] = useState<string[]>([]);
+  const { addToast } = useToast();
+
+  // Local uploads state
   const [selectedFiles, setSelectedFiles] = useState<UploadFile[]>([]);
-  // State for remote files and selection
+  // Remote files and selection
   const [remoteFiles, setRemoteFiles] = useState<string[]>([]);
   const [selectedRemoteFiles, setSelectedRemoteFiles] = useState<Set<string>>(
     new Set()
   );
-  const { addToast } = useToast();
 
-  // Fetch remote file list
+  // Fetch available projects/folders from the backend
+  const fetchFolders = async () => {
+    try {
+      const response = await fetch("http://localhost:8080/folders");
+      if (!response.ok) throw new Error("Error fetching folders");
+      const data = await response.json();
+      setFolders(data || []);
+    } catch (error) {
+      console.error("Error fetching folders:", error);
+      addToast({
+        title: "Error",
+        description: "Failed to fetch folders",
+        variant: "destructive",
+      });
+    }
+  };
+
+  // Fetch remote files for the selected folder
   const fetchFiles = async () => {
     try {
-      const response = await fetch("http://localhost:8080/list");
+      const response = await fetch(
+        `http://localhost:8080/list?folder=${encodeURIComponent(folder)}`
+      );
       if (!response.ok) throw new Error("Error fetching files");
       const data = await response.json();
-      setRemoteFiles(data);
+      setRemoteFiles(data || []);
     } catch (error) {
       console.error("Error fetching files:", error);
       addToast({
@@ -40,10 +63,38 @@ export default function Home() {
   };
 
   useEffect(() => {
-    fetchFiles();
+    fetchFolders();
   }, []);
 
-  // react-dropzone for local file uploads (multiple)
+  useEffect(() => {
+    fetchFiles();
+  }, [folder]);
+
+  // Handler to create a new project (folder)
+  const handleCreateFolder = async (newFolder: string) => {
+    try {
+      const response = await fetch("http://localhost:8080/create-folder", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ folder: newFolder }),
+      });
+      if (!response.ok) throw new Error("Failed to create folder");
+      addToast({
+        title: "Success",
+        description: `Project "${newFolder}" created`,
+      });
+      await fetchFolders();
+    } catch (error) {
+      console.error("Create folder error:", error);
+      addToast({
+        title: "Error",
+        description: "Failed to create project",
+        variant: "destructive",
+      });
+    }
+  };
+
+  // react-dropzone for file uploads
   const onDrop = useCallback((acceptedFiles: File[]) => {
     const uploads = acceptedFiles.map((file) => ({
       file,
@@ -58,27 +109,6 @@ export default function Home() {
     multiple: true,
   });
 
-  // Helper function to compress a file using pako (gzip)
-  const compressFile = (file: File): Promise<Blob> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        try {
-          const arrayBuffer = reader.result as ArrayBuffer;
-          const compressed = pako.gzip(new Uint8Array(arrayBuffer));
-          // Create a Blob from the compressed data.
-          const blob = new Blob([compressed], { type: file.type });
-          resolve(blob);
-        } catch (error) {
-          reject(error);
-        }
-      };
-      reader.onerror = () => reject(reader.error);
-      reader.readAsArrayBuffer(file);
-    });
-  };
-
-  // Update upload progress for a file
   const updateFileProgress = (
     index: number,
     progress: number,
@@ -91,16 +121,14 @@ export default function Home() {
     });
   };
 
-  // Upload all selected files concurrently using axios after compressing them.
+  // Upload all selected files.
   const handleUpload = async () => {
     const uploads = selectedFiles.map(async (upload, index) => {
       updateFileProgress(index, 0, "uploading");
+      const formData = new FormData();
+      formData.append("folder", folder);
+      formData.append("file", upload.file);
       try {
-        // Compress the file before uploading.
-        const compressedBlob = await compressFile(upload.file);
-        const formData = new FormData();
-        // Append the compressed Blob.
-        formData.append("file", compressedBlob, upload.file.name);
         await axios.post("http://localhost:8080/upload", formData, {
           onUploadProgress: (progressEvent) => {
             if (progressEvent.total) {
@@ -130,7 +158,7 @@ export default function Home() {
     fetchFiles();
   };
 
-  // Toggle selection for a remote file
+  // Toggle selection for remote files.
   const toggleRemoteFile = (filename: string) => {
     setSelectedRemoteFiles((prev) => {
       const newSet = new Set(prev);
@@ -143,7 +171,7 @@ export default function Home() {
     });
   };
 
-  // Batch delete selected remote files using unified /delete endpoint.
+  // Batch delete selected remote files.
   const handleDeleteSelected = async () => {
     const filesToDelete = Array.from(selectedRemoteFiles);
     if (filesToDelete.length === 0) {
@@ -155,13 +183,15 @@ export default function Home() {
       return;
     }
     try {
-      // URL-encode each filename.
       const encodedFiles = filesToDelete.map((f) => encodeURIComponent(f));
-      const response = await fetch("http://localhost:8080/delete", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(encodedFiles),
-      });
+      const response = await fetch(
+        `http://localhost:8080/delete?folder=${encodeURIComponent(folder)}`,
+        {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(encodedFiles),
+        }
+      );
       if (!response.ok) throw new Error("Delete failed");
       const result = await response.json();
       addToast({
@@ -180,7 +210,7 @@ export default function Home() {
     }
   };
 
-  // Batch download selected remote files using unified /download endpoint.
+  // Batch download selected remote files.
   const handleDownloadSelected = () => {
     const filesToDownload = Array.from(selectedRemoteFiles);
     if (filesToDownload.length === 0) {
@@ -191,11 +221,12 @@ export default function Home() {
       });
       return;
     }
-    // URL-encode each filename.
     const encodedFiles = filesToDownload
       .map((f) => encodeURIComponent(f))
       .join(",");
-    const url = `http://localhost:8080/download?filename=${encodedFiles}`;
+    const url = `http://localhost:8080/download?folder=${encodeURIComponent(
+      folder
+    )}&filename=${encodedFiles}`;
     const link = document.createElement("a");
     link.href = url;
     if (filesToDownload.length > 1) {
@@ -208,18 +239,18 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col items-center p-4 space-y-8">
-      {/* Header */}
-      <header className="w-full max-w-4xl text-center">
-        <h1 className="text-4xl font-bold text-gray-800">File Manager</h1>
-        <p className="text-gray-600 mt-2">
-          Upload, download, and manage your files.
-        </p>
-      </header>
+      {/* Project (Folder) Selection */}
+      <ProjectSelection
+        folders={folders}
+        value={folder}
+        onChange={setFolder}
+        onCreateFolder={handleCreateFolder}
+      />
 
       {/* Upload Section */}
       <div className="w-full max-w-4xl bg-white shadow-md rounded-lg p-6">
         <h2 className="text-2xl font-semibold text-gray-700 mb-4">
-          Upload Files
+          Upload Files to "{folder || "root"}"
         </h2>
         <div
           {...getRootProps()}
@@ -253,7 +284,7 @@ export default function Home() {
       {/* Remote Files Section */}
       <div className="w-full max-w-4xl bg-white shadow-md rounded-lg p-6">
         <h2 className="text-2xl font-semibold text-gray-700 mb-4">
-          Uploaded Files
+          Files in "{folder || "root"}"
         </h2>
         {remoteFiles.length === 0 ? (
           <p className="text-gray-500">No files uploaded yet.</p>
@@ -273,9 +304,9 @@ export default function Home() {
                       className="h-4 w-4"
                     />
                     <a
-                      href={`http://localhost:8080/download?filename=${encodeURIComponent(
-                        filename
-                      )}`}
+                      href={`http://localhost:8080/download?folder=${encodeURIComponent(
+                        folder
+                      )}&filename=${encodeURIComponent(filename)}`}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-blue-600 hover:underline"
